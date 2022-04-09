@@ -1,20 +1,31 @@
-#!/bin/sh
+#!/usr/bin/env bash
 
 # Main Constants
 
 SYL_TMP='/tmp'
 SYL_RUNID="$(date '+%Y%m%d%H%M%S')-$(printf '%06d' "$$")"
 SYL_LOG="${SYL_TMP}/dev-bootstrap-${SYL_RUNID}.log"
-SYL_GIT_DIR="${HOME}/git/syllable"
-SYL_SYLSH_DIR="${SYL_GIT_DIR}/sylsh"
+SYL_GIT_DIR="${SYL_GIT_DIR:-"${HOME}/git/syllable"}"
+SYL_SYLSH_DIR="${SYL_SYLSH_DIR:-"${SYL_GIT_DIR}/sylsh"}"
 SYL_DOCKER_DESKTOP_APP='/Applications/Docker.app'
+SYL_SSH_DIR="${HOME}/.ssh"
+SYL_SSH_KNOWN_HOSTS="${SYL_SSH_DIR}/known_hosts"
+SYL_SSH_KEY_NAME="sylsh"
 
-GITHUB='github.com'
-SYLSH_GIT_PATH='asksyllable/sylsh.git'
+SYL_GITHUB='github.com'
+SYL_SYLSH_GIT_PATH='asksyllable/sylsh.git'
 
 DEFAULT_HOMEBREW_URL='https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh'
 HOMEBREW_URL="${HOMEBREW_URL:-"${DEFAULT_HOMEBREW_URL}"}"
 
+if printf '%s\n' "${LC_CTYPE}" | grep -Eiq '\butf-8\b'
+then
+	CHECK=$(printf '\342\234\223')
+	CROSS=$(printf '\342\234\227')
+else
+	CHECK='v'
+	CROSS='x'
+fi
 
 # Colors
 
@@ -115,7 +126,7 @@ syl_print_unrecoverable_install_error() {
 			'Bad news...' \
 			"It looks like \"${app_name}\" could not be properly installed and" \
 			'the setup process cannot proceed without it.'
-			'Please contact support at "itsupport@syllable.ai".' \
+			'Please contact IT support.' \
 			''
 	)
 }
@@ -141,11 +152,11 @@ syl_is_valid_command() {
 			check_version='1'
 		fi
 		command="$1"
-		if command -v "${command}" >/dev/null
+		if command -v -- "${command}" >/dev/null 2>&1
 		then
 			if [ -n "${check_version}" ]
 			then
-				"${command}" --version >/dev/null 2>&1 && exit 0 || exit 1
+				command -- "${command}" --version >/dev/null 2>&1 || exit 1
 			fi
 			exit 0
 		fi
@@ -155,69 +166,268 @@ syl_is_valid_command() {
 
 syl_is_sylsh_installed() {
 	(
-		cd -- "${SYL_SYLSH_DIR}" >&2 && git status >&2 && "${SYL_SYLSH_DIR}/bin/syl" version >&2
+		syl_is_valid_command 'syl'
+	)
+}
+
+syl_update_known_hosts() {
+	(
+		host="$1"
+		known_hosts="${SYL_SSH_KNOWN_HOSTS}"
+		ssh-keyscan "${host}" >>"${known_hosts}" && (
+			# Attempt to remove duplicates from known_hosts ignoring failure
+			sort -u -o "${known_hosts}" "${known_hosts}" >&2
+			exit 0
+		)
+	)
+}
+
+syl_is_sylsh_cloned() {
+	(
+		sylsh_exec="syl.sh"
+		cd -- "${SYL_SYLSH_DIR}" >&2 &&
+		test -n "$(git tag --list 'v0.1.0')" &&
+		test -f "${sylsh_exec}" &&
+		test -x "${sylsh_exec}"
 	)
 }
 
 syl_clone_sylsh() {
 	(
-		! syl_is_sylsh_installed &&
-		cd -- "$(dirname -- "${SYL_SYLSH_DIR}")" >&2 &&
-		ssh-keyscan -H "${GITHUB}" >> ~/.ssh/known_hosts &&
-		git clone "git@${GITHUB}:${SYLSH_GIT_PATH}" "$(basename -- "${SYL_SYLSH_DIR}")" >&2 ||
-		exit 1
-	)
-}
-
-syl_get_available_ssh_keys() {
-	find "${HOME}/.ssh" -type f -iname '*.pub' | (
-		while read -r file
-		do
-			name="${file##*'/'}"
-			name="${name%'.pub'}"
-			printf 'Found SSH key: %s\n' "${name}" >&2
-			printf '%s\n' "${name}"
-		done
+		syl_is_sylsh_cloned || (
+			sylsh_parent_dir=$(dirname -- "${SYL_SYLSH_DIR}")
+			sylsh_dir_name=$(basename -- "${SYL_SYLSH_DIR}")
+			syl_ensure_accessible_dir -c "${sylsh_parent_dir}" &&
+			test -w "${sylsh_parent_dir}" &&
+			cd -- "${sylsh_parent_dir}" >&2 &&
+			syl_update_known_hosts "${SYL_GITHUB}" &&
+			git clone "git@${SYL_GITHUB}:${SYL_SYLSH_GIT_PATH}" "${sylsh_dir_name}" >&2
+		)
 	)
 }
 
 syl_select() {
-	printf '%s\n' "$1" | (
-		index='1'
-		while read -r item
+	(
+		options="$1"
+		prompt="${2:-" Your option?"}"
+		printf '%s\n' "${options}" | (
+			format=' %d) %s\n'
+			if [ -t 4 ]; then
+				format="${COLOR_CYAN}${format}${COLOR_RESET}"
+			fi
+			index='0'
+			while read -r item
+			do
+				index=$(($index + 1))
+				printf "${format}" "${index}" "${item}" >&4
+			done
+			[ "${index}" -lt 1 ] && exit 1
+			syl_print_info -n "${prompt} [1-${index} or just press enter for none] " >&4
+			reply=$(syl_prompt <&3)
+			if [ "${reply}" -ge 1 ] && [ "${reply}" -le "${index}" ]
+			then
+				printf '%s\n' "${options}" | sed -n "${reply}p"
+				exit 0
+			fi
+			exit 1
+		)
+	)
+}
+
+syl_test_select() {
+	(
+		exec 3<&0 4>&1
+		reply=$(syl_select "$1")
+		if [ $? -eq 0 ]
+		then
+			syl_print_info " Selected: ${reply}"
+			exit 0
+		fi
+		exit 1
+	)
+}
+
+syl_check_required_utilities() {
+	(
+		result='0'
+		missing=''
+		while [ $# -gt 0 ]
 		do
-			printf ' %02d) %s\n' "${index}" "${item}"
-			index=$(($index + 1))
+			utility="$1"
+			shift 1
+			if ! command -v -- "${utility}" >/dev/null 2>&1
+			then
+				missing="${missing}, ${utility}"
+				result='1'
+			fi
 		done
+		missing="${missing#', '}"
+		if [ -n "${missing}" ]
+		then
+			printf 'Missing required utilities: %s\n' \
+				"${missing}" >&2
+			syl_print_warn " > Missing required utilities: ${missing}"
+		fi
+		exit "${result}"
+	)
+}
+
+syl_is_valid_ssh_key() {
+	(
+		key_name="$1"
+		[ -n "${key_name}" ] && (
+			private_key="${SYL_SSH_DIR}/${key_name}"
+			public_key="${private_key}.pub"
+			(
+				test -f "${private_key}" &&
+				test -r "${private_key}" &&
+				test -f "${public_key}" &&
+				test -r "${public_key}" &&
+				ssh-keygen -l -f "${public_key}" >&2
+			)
+		)
+	)
+}
+
+syl_select_ssh_key() {
+	(
+		key_name="$1"
+		syl_is_valid_ssh_key "${key_name}" && (
+			sylsh_key_name="${SYL_SSH_KEY_NAME}"
+			[ "${key_name}" == "${sylsh_key_name}" ] || (
+				key_path="${SYL_SSH_DIR}/${key_name}"
+				sylsh_key_path="${SYL_SSH_DIR}/${sylsh_key_name}"
+				# Create hard links
+				ln -f "${key_path}" "${sylsh_key_path}" &&
+				ln -f "${key_path}.pub" "${sylsh_key_path}.pub"
+			)
+		)
+	)
+}
+
+syl_get_available_ssh_keys() {
+	(
+		for entry in "${SYL_SSH_DIR}"/*.pub
+		do
+			name="${entry##*'/'}"
+			name="${name%'.pub'}"
+			if syl_is_valid_ssh_key "${name}"
+			then
+				printf 'Valid SSH key found: %s\n' "${name}" >&2
+				printf '%s\n' "${name}"
+			else
+				printf 'Invalid SSH key: %s\n' "${name}" >&2
+			fi
+		done
+	) | sort
+}
+
+syl_prepare_ssh_key() {
+	(
+		if ! syl_is_valid_ssh_key "${SYL_SSH_KEY_NAME}"
+			ssh_keys=$(syl_get_available_ssh_keys)
+			ssh_key_count=$(printf '%s\n' "${ssh_keys}" |
+				grep -Ev '^[[:blank:]]*$' |
+				wc -l |
+				tr -d '[:blank:]')
+			
+			(
+				[ "${ssh_key_count}" -gt 1 ] || exit 1
+				syl_print_info ' > The following SSH keys were found on your system:'
+				# syl_select requires the additional #3 and #4 file descriptors mapped to
+				# STDIN and STDOUT respectively
+				exec 3<&0 4>&1
+				selected=$(syl_select "${ssh_keys}" ' > Which one would you like to use?')
+				[ $? -eq 0 ] && [ -n "${selected}" ] && syl_select_ssh_key "${selected}"
+			) || (
+				[ "${ssh_key_count}" -eq 1 ] || exit 1
+
+			) || (
+
+			)
+
+			if [ "${ssh_key_count}" -gt 1 ]
+			then
+				syl_print_info ' > The following SSH keys were found on your system:'
+				(
+					# syl_select requires the additional 3 and 4 file descriptors mapped to
+					# STDIN and STDOUT respectively
+					exec 3<&0 4>&1
+					selected=$(syl_select "${ssh_keys}" ' > Which one would you like to use?')
+					if [ $? -eq 0 ] && [ -n "${selected}" ]
+					then
+						syl_select_ssh_key
+					fi
+				)
+			elif [ "${ssh_key_count}" -eq 1 ]
+			then
+				syl_print_info -n " > Would you like to use the \"${ssh_keys}\" SSH key? [Y/n] "
+				reply=$(syl_prompt)
+				if ! syl_is_no
+				then
+
+				fi
+			else
+				ssh-keygen -t ed25519 -C "${reply}" -f "${HOME}/.ssh/sylsh" -N ''
+			fi
+		fi
 	)
 }
 
 syl_install_sylsh() {
-	if ! syl_clone_sylsh; then
-		syl_print_info \
-			'SYLSH is a Syllable private repository and you need permissions to access' \
-			'its contants.'
-		ssh_keys=$(syl_get_available_ssh_keys)
-		if [ -n "${ssh_keys}" ]; then
-			syl_select "${ssh_keys}"
-			exit 1
-		else
-			syl_print_info -n 'Would you like to create an SSH key now? [Y/n] '
+	(
+		syl_check_required_utilities \
+			'ssh-keygen' \
+			'ssh-add' \
+			'ssh-keyscan' \
+			'git' || exit 2
+
+		if ! syl_clone_sylsh;
+		then
+			syl_print_info \
+				' > The SYLSH utility is a private Syllable project and special permissions' \
+				'   are needed to access its contents.' \
+				' > Before proceeding, please make sure you have a an active GitHub account' \
+				'   and that you are a member of the Syllable Developers group.'
+			syl_print_info -n ' > Continue? [Y/n] '
 			reply=$(syl_prompt)
-			if syl_is_no "${reply}"; then
-				syl_print_info 'OK. Aborting installation of syl.sh utility...'
-				exit 1
-			fi
-			syl_print_info 'OK.' 'What is your email address?'
-			reply=$(syl_prompt)
-			ssh-keygen -t ed25519 -C "${reply}" -f "${HOME}/.ssh/sylsh" -N ''
+			syl_is_no "${reply}" && exit 1
+			echo
+			( syl_prepare_ssh_key && ( syl_clone_sylsh || exit 2 ) ) || exit "$?"
 		fi
-	fi
+	)
+}
+
+syl_print_log_tail_command() {
+	(
+		syl_print_info \
+			' > See what is happening behind the scenes by typing the following command' \
+			'   in another terminal:'
+		syl_print_warn \
+			"   tail -f '${SYL_LOG}'"
+	)
 }
 
 syl_main() {
 	(
-		# TODO: Check basic-utility requirements
+		# Option to run internal commands -- Useful for testing
+		if [  "X$1" = 'X--run-internal' ] && [ $# -gt 1 ]
+		then
+			command="$2"
+			shift 2
+			if (
+				printf '%s\n' "${command}" | grep -Eq '^syl_[[:alnum:]_]+$' &&
+				syl_is_valid_command "${command}"
+			)
+			then
+				"${command}" "$@"
+				exit "$?"
+			else
+				syl_print_error 'Invalid internal command.'
+				exit 1
+			fi
+		fi
+
 		if ! syl_is_macOS
 		then
 			syl_print_error \
@@ -230,12 +440,12 @@ syl_main() {
 		syl_print_info \
 			'' \
 			'Welcome to Syllable Developer Setup Utility!' \
-			''
-			'This script will install a minimal set of applications which are required for' \
-			'regular developer activities.' \
+			'' \
+			'This script will attempt to install a minimal set of applications' \
+			'which are required for regular developer activities.' \
 			''
 
-		syl_print_info -n 'Proceed with installation? [Y/n] '
+		syl_print_info -n 'Continue? (It is safe to run this script multiple times) [Y/n] '
 		reply=$(syl_prompt)
 		if syl_is_no "${reply}"
 		then
@@ -256,7 +466,6 @@ syl_main() {
 				''
 
 			if ! (
-				# Make STDERR == STDOUT when installing Homebrew
 				exec 2>&1
 				/bin/bash -c "$(curl -fsSL "${HOMEBREW_URL}")"
 			)
@@ -275,7 +484,7 @@ syl_main() {
 		# Double-check if Homebrew has been correctly installed
 		if syl_is_valid_command -v 'brew'
 		then
-			syl_print_info '[v] Homebrew is already installed!'
+			syl_print_info "[${CHECK}] Homebrew is already installed!"
 		else
 			syl_print_unrecoverable_install_error 'Homebrew'
 			exit 1
@@ -284,7 +493,7 @@ syl_main() {
 		# How about git?
 		if syl_is_valid_command -v 'git'
 		then
-			syl_print_info '[v] Git is already installed!'
+			syl_print_info "[${CHECK}] Git is already installed!"
 		else
 			syl_print_unrecoverable_install_error 'Git'
 			exit 1
@@ -293,7 +502,7 @@ syl_main() {
 		# Default Git Repository
 		if syl_ensure_accessible_dir -c "${SYL_GIT_DIR}" && test -w "${SYL_GIT_DIR}"
 		then
-			syl_print_info "[v] Git repositories folder at: ${SYL_GIT_DIR}"
+			syl_print_info "[${CHECK}] Git repositories folder at: ${SYL_GIT_DIR}"
 		else
 			syl_print_unrecoverable_install_error 'Git'
 			exit 1
@@ -304,51 +513,90 @@ syl_main() {
 		then
 			if softwareupdate --install-rosetta --agree-to-license >&2
 			then
-				syl_print_info '[v] Rosetta 2 is already installed!'
+				syl_print_info "[${CHECK}] Rosetta 2 is already installed!"
 			else
-				syl_print_warn '[x] Rosetta could not be installed...'
+				syl_print_warn "[${CROSS}] Rosetta could not be installed..."
 			fi
 		fi
 
 		# How about Docker Desktop App?
 		if [ -e "${SYL_DOCKER_DESKTOP_APP}" ]
 		then
-			syl_print_info '[v] Docker Desktop is already installed!'
+			syl_print_info "[${CHECK}] Docker Desktop is already installed!"
 		else
 			syl_print_info \
 				'Installing Docker Desktop...' \
 				''
-			if brew install --cask docker >&2
+			if (
+				exec 2>&1
+				brew install --cask docker
+			)
 			then
-				syl_print_info '[v] Docker Desktop successfully installed!'
+				syl_print_info "[${CHECK}] Docker Desktop successfully installed!"
 			else
 				syl_print_warn \
-					'[x] Something went wrong while installing Docker Desktop...' \
-					'    Please request support at "itsupport@syllable.ai" and provide the following' \
-					"    log file with error details: \"${SYL_LOG}\"". \
-					'    Or you can try a manual install at "https://docs.docker.com/desktop/mac/install/".' \
+					"[${CROSS}] Something went wrong while installing Docker Desktop..." \
+					'    Please contact IT support and provide the following file' \
+					"    with error details: \"${SYL_LOG}\"". \
+					'    You can try a manual install at "https://docs.docker.com/desktop/mac/install/".' \
 					''
+			fi
+		fi
+
+		# Check if Ansible is installed
+		if syl_is_valid_command -v 'ansible'
+		then
+			syl_print_info "[${CHECK}] Ansible is already installed!"
+		else
+			echo
+			syl_print_info -n ' > Would you like to install Ansible? [Y/n] '
+			reply=$(syl_prompt)
+			echo
+			if ! syl_is_no "${reply}"
+			then
+				syl_print_info \
+					'Installing Ansible...' \
+					''
+				if (
+					exec 2>&1
+					brew install ansible
+				)
+				then
+					syl_print_info "[${CHECK}] Ansible successfully installed!"
+				else
+					syl_print_warn \
+						"[${CROSS}] Something went wrong while installing Ansible..." \
+						'    Please contact IT support and provide the following file' \
+						"    with error details: \"${SYL_LOG}\"". \
+						''
+				fi
+			else
+				syl_print_warn "[${CROSS}] Ansible installation skipped by the user."
 			fi
 		fi
 
 		# Install syl.sh
 		if syl_is_sylsh_installed
 		then
-			syl_print_info '[v] syl.sh is already installed!'
+			syl_print_info "[${CHECK}] syl.sh is already installed!"
 		else
+			syl_print_info \
+				'Installing SYLSH Utility...' \
+				''
+
 			syl_install_sylsh
 			result="$?"
 			if [ "${result}" -eq 0 ]
 			then
-				syl_print_info '[v] syl.sh successfully installed!'
+				syl_print_info "[${CHECK}] syl.sh successfully installed!"
 			elif [ "${result}" -eq 1 ]
 			then
-				syl_print_info '[x] syl.sh installation aborted by the user.'
+				syl_print_warn "[${CROSS}] syl.sh installation aborted by the user."
 			else
 				syl_print_warn \
-					'[x] Something went wrong while installing the "syl.sh" utility...' \
-					'    Please request support at "itsupport@syllable.ai" and provide the following' \
-					"    log file with error details: \"${SYL_LOG}\"". \
+					"[${CROSS}] Something went wrong while installing the \"syl.sh\" utility..." \
+					'    Please contact IT support and provide the following file' \
+					"    with error details: \"${SYL_LOG}\"". \
 					''
 			fi
 		fi
