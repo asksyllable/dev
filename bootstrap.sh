@@ -90,6 +90,34 @@ syl_prompt() {
 	)
 }
 
+syl_prompt_email() {
+	(
+		reply=$(syl_prompt)
+		if [ $? -eq 0 ] && [ -n "${reply}" ]
+		then
+			printf '%s' "${reply}" |
+			sed -En '1s/^[[:space:]]*([[:graph:]]+@[[:graph:]]+)[[:space:]]*$/\1/p'
+			exit 0
+		fi
+		exit 1
+	)
+}
+
+syl_prompt_password() {
+	(
+		stty -echo
+		read -r password
+		status="$?"
+		stty echo
+		if [ "${status}" -eq 0 ] && [ -n "${password}" ]
+		then
+			printf '%s\n' "${password}"
+			exit 0
+		fi
+		exit 1
+	)
+}
+
 syl_is_yes() {
 	(
 		reply=$(printf '%s\n' "$1" | tr '[:upper:]' '[:lower:]')
@@ -325,51 +353,99 @@ syl_get_available_ssh_keys() {
 syl_prepare_ssh_key() {
 	(
 		if ! syl_is_valid_ssh_key "${SYL_SSH_KEY_NAME}"
+			syl_print_info -n ' > Searching SSH keys on your system... '
+			sleep 1
+
+			# Populate local variables with SSH keys info
 			ssh_keys=$(syl_get_available_ssh_keys)
 			ssh_key_count=$(printf '%s\n' "${ssh_keys}" |
 				grep -Ev '^[[:blank:]]*$' |
 				wc -l |
 				tr -d '[:blank:]')
-			
+
 			(
+				# Multiple SSH Keys found
 				[ "${ssh_key_count}" -gt 1 ] || exit 1
-				syl_print_info ' > The following SSH keys were found on your system:'
+				syl_print_info "${ssh_key_count} keys found!"
 				# syl_select requires the additional #3 and #4 file descriptors mapped to
 				# STDIN and STDOUT respectively
 				exec 3<&0 4>&1
 				selected=$(syl_select "${ssh_keys}" ' > Which one would you like to use?')
-				[ $? -eq 0 ] && [ -n "${selected}" ] && syl_select_ssh_key "${selected}"
-			) || (
-				[ "${ssh_key_count}" -eq 1 ] || exit 1
-
-			) || (
-
-			)
-
-			if [ "${ssh_key_count}" -gt 1 ]
-			then
-				syl_print_info ' > The following SSH keys were found on your system:'
-				(
-					# syl_select requires the additional 3 and 4 file descriptors mapped to
-					# STDIN and STDOUT respectively
-					exec 3<&0 4>&1
-					selected=$(syl_select "${ssh_keys}" ' > Which one would you like to use?')
-					if [ $? -eq 0 ] && [ -n "${selected}" ]
-					then
-						syl_select_ssh_key
-					fi
+				[ $? -eq 0 ] && [ -n "${selected}" ] && (
+					syl_select_ssh_key "${selected}" || (
+						printf 'Error selecting one of multiple SSH keys: %s\n' "${selected}" >&2
+						exit 2
+					)
 				)
-			elif [ "${ssh_key_count}" -eq 1 ]
-			then
-				syl_print_info -n " > Would you like to use the \"${ssh_keys}\" SSH key? [Y/n] "
+			) || (
+				# A single SSH key was found
+				[ $? -gt 1 ] && exit 2
+				[ "${ssh_key_count}" -eq 1 ] || exit 1
+				syl_print_info "${ssh_key_count} key found!"
+				syl_print_info -n " > Would you like to use the SSH key \"${ssh_keys}\"? [Y/n] "
 				reply=$(syl_prompt)
-				if ! syl_is_no
-				then
+				[ $? -eq 0 ] && ! syl_is_no "${reply}" && (
+					syl_select_ssh_key "${ssh_keys}" || (
+						printf 'Error selecting unique SSH key found: %s\n' "${selected}" >&2
+						exit 2
+					)
+				)
+			) || (
+				# No SSH was found or none was selected
+				[ $? -gt 1 ] && exit 2
+				[ "${ssh_key_count}" -eq 0 ] && syl_print_info 'None found.'
+				syl_print_info
+					" > OK. Let's create one!" \
+					" > In order to create a SSH key you need to provide an email address and a passphrase." \
+					" > Let's begin with the email address!"
 
-				fi
-			else
-				ssh-keygen -t ed25519 -C "${reply}" -f "${HOME}/.ssh/sylsh" -N ''
-			fi
+				# Get user email
+				email=''
+				while [ -z "${email}" ]
+				do
+					syl_print_info -n " > Which email address would you like to use? "
+					reply=$(syl_prompt_email)
+					if [ $? -eq 0 ] && [ -n "${reply}" ]
+					then
+						email="${reply}"
+						syl_print_info -n " > Confirm usage of email \"${email}\"? [Y/n] "
+						reply=$(syl_prompt)
+						if [ $? -eq 0 ]
+						then
+							if syl_is_no "${reply}"
+							then
+								email=''
+								continue
+							else
+								syl_print_info ' > OK.'
+								break
+							fi
+						else
+							printf 'Aborted by user due to invalid input for email confirmation...\n'
+							syl_print_info ' > Aborting...'
+							exit 1
+						fi
+					else
+						printf 'Aborted by user due to invalid input for email...\n'
+						syl_print_info ' > Aborting...'
+						exit 1
+					fi
+				done
+
+				# Get passphrase
+				passphrase=''
+				while [ -z "${passphrase}" ]
+				do
+				done
+
+				# Generate SSH Key
+				ssh-keygen \
+					-t ed25519 \
+					-C "${email}" \
+					-f "${SYL_SSH_DIR}/${SYL_SSH_KEY_NAME}" \
+					-N "${passphrase}" >&2 || exit 2
+
+			) || exit $?
 		fi
 	)
 }
@@ -393,7 +469,7 @@ syl_install_sylsh() {
 			reply=$(syl_prompt)
 			syl_is_no "${reply}" && exit 1
 			echo
-			( syl_prepare_ssh_key && ( syl_clone_sylsh || exit 2 ) ) || exit "$?"
+			( syl_prepare_ssh_key && ( syl_clone_sylsh || exit 2 ) ) || exit $?
 		fi
 	)
 }
@@ -421,7 +497,7 @@ syl_main() {
 			)
 			then
 				"${command}" "$@"
-				exit "$?"
+				exit $?
 			else
 				syl_print_error 'Invalid internal command.'
 				exit 1
