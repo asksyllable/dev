@@ -234,41 +234,29 @@ syl_clone_sylsh() {
 	)
 }
 
-syl_select() {
+syl_select_interactive() {
 	(
-		options="$1"
-		prompt="${2:-" Your option?"}"
-		printf '%s\n' "${options}" | (
-			format=' %d) %s\n'
-			if [ -t 4 ]; then
-				format="${COLOR_CYAN}${format}${COLOR_RESET}"
-			fi
-			index='0'
-			while read -r item
-			do
-				index=$(($index + 1))
-				printf "${format}" "${index}" "${item}" >&4
-			done
-			[ "${index}" -lt 1 ] && exit 1
-			syl_print_info -n "${prompt} [1-${index} or just press enter for none] " >&4
-			reply=$(syl_prompt <&3)
-			if [ "${reply}" -ge 1 ] && [ "${reply}" -le "${index}" ]
-			then
-				printf '%s\n' "${options}" | sed -n "${reply}p"
-				exit 0
-			fi
-			exit 1
+		exec 3</dev/tty 4>/dev/tty || exit 2
+		prompt="${1:-" Your option?"}"
+		format="${COLOR_CYAN} %d) %s\n${COLOR_RESET}"
+		index='0'
+		while read -r item
+		do
+			index=$(($index + 1))
+			eval "option_${index}=${item}"
+			printf "${format}" "${index}" "${item}" >&4
+		done
+		[ "${index}" -lt 1 ] && exit 1
+		syl_print_info -n "${prompt} [1-${index} or anything else for none] " >&4
+		reply=$(syl_prompt <&3)
+		if (
+			[ $? -eq 0 ] &&
+			[ -n "${reply##*[!0-9]*}" ] &&
+			[ "${reply}" -ge 1 ] &&
+			[ "${reply}" -le "${index}" ]
 		)
-	)
-}
-
-syl_test_select() {
-	(
-		exec 3<&0 4>&1
-		reply=$(syl_select "$1")
-		if [ $? -eq 0 ]
 		then
-			syl_print_info " Selected: ${reply}"
+			eval "printf '%s\n' \"\${option_${reply}}\""
 			exit 0
 		fi
 		exit 1
@@ -350,27 +338,62 @@ syl_get_available_ssh_keys() {
 	) | sort
 }
 
+syl_select_existing_ssh_key_interactive() {
+	(
+		exec 3</dev/tty 4>/dev/tty || exit 2
+		syl_print_info -n ' > Searching SSH keys on your system... ' >&4
+
+		# Tiny pause...
+		sleep 1
+
+		# Populate local variables with SSH keys info
+		ssh_keys=$(syl_get_available_ssh_keys)
+		ssh_key_count=$(printf '%s\n' "${ssh_keys}" |
+			grep -Ev '^[[:blank:]]*$' |
+			wc -l |
+			tr -d '[:blank:]')
+
+		if [ "${ssh_key_count}" -gt 1 ]
+		then
+			# Multiple SSH Keys found
+			syl_print_info "${ssh_key_count} keys found!" >&4
+			selected=$(printf '%s\n' "${ssh_keys}" |
+				syl_select_interactive ' > Which one would you like to use?')
+			if [ $? -eq 0 ] && [ -n "${selected}" ]
+			then
+				printf '%s\n' "${selected}"
+			fi
+		elif [ "${ssh_key_count}" -eq 1 ]
+		then
+			syl_print_info "${ssh_key_count} key found!" >&4
+			syl_print_info -n " > Would you like to use the SSH key \"${ssh_keys}\"? [Y/n] " >&4
+			reply=$(syl_prompt <&3)
+			if [ $? -eq 0 ] && ! syl_is_no "${reply}"
+			then
+				printf '%s\n' "${ssh_keys}"
+			fi
+		else
+			syl_print_info 'None found.' >&4
+		fi
+		exit 0
+	)
+}
+
 syl_prepare_ssh_key() {
 	(
 		if ! syl_is_valid_ssh_key "${SYL_SSH_KEY_NAME}"
+		then
 			syl_print_info -n ' > Searching SSH keys on your system... '
 			sleep 1
 
-			# Populate local variables with SSH keys info
-			ssh_keys=$(syl_get_available_ssh_keys)
-			ssh_key_count=$(printf '%s\n' "${ssh_keys}" |
-				grep -Ev '^[[:blank:]]*$' |
-				wc -l |
-				tr -d '[:blank:]')
+
 
 			(
 				# Multiple SSH Keys found
 				[ "${ssh_key_count}" -gt 1 ] || exit 1
 				syl_print_info "${ssh_key_count} keys found!"
-				# syl_select requires the additional #3 and #4 file descriptors mapped to
-				# STDIN and STDOUT respectively
-				exec 3<&0 4>&1
-				selected=$(syl_select "${ssh_keys}" ' > Which one would you like to use?')
+
+				selected=$(syl_select_interactive "${ssh_keys}" ' > Which one would you like to use?')
 				[ $? -eq 0 ] && [ -n "${selected}" ] && (
 					syl_select_ssh_key "${selected}" || (
 						printf 'Error selecting one of multiple SSH keys: %s\n' "${selected}" >&2
@@ -433,10 +456,10 @@ syl_prepare_ssh_key() {
 				done
 
 				# Get passphrase
-				passphrase=''
-				while [ -z "${passphrase}" ]
-				do
-				done
+				# passphrase=''
+				# while [ -z "${passphrase}" ]
+				# do
+				# done
 
 				# Generate SSH Key
 				ssh-keygen \
@@ -453,8 +476,8 @@ syl_prepare_ssh_key() {
 syl_install_sylsh() {
 	(
 		syl_check_required_utilities \
-			'ssh-keygen' \
 			'ssh-add' \
+			'ssh-keygen' \
 			'ssh-keyscan' \
 			'git' || exit 2
 
@@ -681,5 +704,8 @@ syl_main() {
 
 # Entry Point
 
-touch "${SYL_LOG}" >/dev/null 2>&1 && exec 2>"${SYL_LOG}"
+if touch "${SYL_LOG}" >/dev/null 2>&1
+then
+	exec 2>"${SYL_LOG}"
+fi
 syl_main "$@"
