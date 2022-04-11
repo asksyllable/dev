@@ -501,7 +501,6 @@ syl_create_ssh_key_interactive() {
 
 		# Generate SSH Key
 		ssh-keygen \
-			-ALKSmdlkma asjndakjnasd \
 			-t ed25519 \
 			-f "${SYL_SSH_DIR}/${key_name}" \
 			-C "${email}" \
