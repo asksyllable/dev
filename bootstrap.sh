@@ -513,6 +513,8 @@ syl_create_ssh_key_interactive() {
 			exit 2
 		fi
 
+		syl_print_info " > SSH key \"${key_name}\" successfully created!" >&4
+
 		printf '%s\n' "${key_name}" "${passphrase}"
 		exit 0
 	)
