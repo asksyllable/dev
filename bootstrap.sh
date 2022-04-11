@@ -10,7 +10,7 @@ SYL_SYLSH_DIR="${SYL_SYLSH_DIR:-"${SYL_GIT_DIR}/sylsh"}"
 SYL_DOCKER_DESKTOP_APP='/Applications/Docker.app'
 SYL_SSH_DIR="${HOME}/.ssh"
 SYL_SSH_KNOWN_HOSTS="${SYL_SSH_DIR}/known_hosts"
-SYL_SSH_KEY_NAME="sylsh"
+SYL_SSH_KEY_NAME_PREFIX="sylsh"
 
 SYL_GITHUB='github.com'
 SYL_SYLSH_GIT_PATH='asksyllable/sylsh.git'
@@ -93,7 +93,7 @@ syl_prompt() {
 syl_prompt_email() {
 	(
 		reply=$(syl_prompt)
-		if [ $? -eq 0 ] && [ -n "${reply}" ]
+		if [ $? -eq 0 ]
 		then
 			printf '%s' "${reply}" |
 			sed -En '1s/^[[:space:]]*([[:graph:]]+@[[:graph:]]+)[[:space:]]*$/\1/p'
@@ -109,7 +109,7 @@ syl_prompt_password() {
 		read -r password
 		status="$?"
 		stty echo
-		if [ "${status}" -eq 0 ] && [ -n "${password}" ]
+		if [ "${status}" -eq 0 ]
 		then
 			printf '%s\n' "${password}"
 			exit 0
@@ -236,7 +236,15 @@ syl_clone_sylsh() {
 
 syl_select_interactive() {
 	(
-		exec 3</dev/tty 4>/dev/tty || exit 2
+		# Directly access process TTY
+		exec 3</dev/tty 4>/dev/tty
+		if [ $? -ne 0 ]
+		then
+			printf '%s: Unable to access process TTY.\n' \
+				'syl_select_interactive' >&2
+			exit 2
+		fi
+
 		prompt="${1:-" Your option?"}"
 		format="${COLOR_CYAN} %d) %s\n${COLOR_RESET}"
 		index='0'
@@ -247,7 +255,7 @@ syl_select_interactive() {
 			printf "${format}" "${index}" "${item}" >&4
 		done
 		[ "${index}" -lt 1 ] && exit 1
-		syl_print_info -n "${prompt} [1-${index} or anything else for none] " >&4
+		syl_print_info -n "${prompt} [1-${index}] " >&4
 		reply=$(syl_prompt <&3)
 		if (
 			[ $? -eq 0 ] &&
@@ -305,22 +313,6 @@ syl_is_valid_ssh_key() {
 	)
 }
 
-syl_select_ssh_key() {
-	(
-		key_name="$1"
-		syl_is_valid_ssh_key "${key_name}" && (
-			sylsh_key_name="${SYL_SSH_KEY_NAME}"
-			[ "${key_name}" == "${sylsh_key_name}" ] || (
-				key_path="${SYL_SSH_DIR}/${key_name}"
-				sylsh_key_path="${SYL_SSH_DIR}/${sylsh_key_name}"
-				# Create hard links
-				ln -f "${key_path}" "${sylsh_key_path}" &&
-				ln -f "${key_path}.pub" "${sylsh_key_path}.pub"
-			)
-		)
-	)
-}
-
 syl_get_available_ssh_keys() {
 	(
 		for entry in "${SYL_SSH_DIR}"/*.pub
@@ -340,7 +332,15 @@ syl_get_available_ssh_keys() {
 
 syl_select_existing_ssh_key_interactive() {
 	(
-		exec 3</dev/tty 4>/dev/tty || exit 2
+		# Directly access process TTY
+		exec 3</dev/tty 4>/dev/tty
+		if [ $? -ne 0 ]
+		then
+			printf '%s: Unable to access process TTY.\n' \
+				'syl_select_existing_ssh_key_interactive' >&2
+			exit 2
+		fi
+
 		syl_print_info -n ' > Searching SSH keys on your system... ' >&4
 
 		# Tiny pause...
@@ -356,120 +356,179 @@ syl_select_existing_ssh_key_interactive() {
 		if [ "${ssh_key_count}" -gt 1 ]
 		then
 			# Multiple SSH Keys found
-			syl_print_info "${ssh_key_count} keys found!" >&4
+			syl_print_info "${ssh_key_count} keys found!" \
+				' > Would you like to use any of them? (Leave empty to create one)' >&4
 			selected=$(printf '%s\n' "${ssh_keys}" |
-				syl_select_interactive ' > Which one would you like to use?')
+				syl_select_interactive ' > Your option?')
 			if [ $? -eq 0 ] && [ -n "${selected}" ]
 			then
 				printf '%s\n' "${selected}"
+				exit 0
 			fi
 		elif [ "${ssh_key_count}" -eq 1 ]
 		then
 			syl_print_info "${ssh_key_count} key found!" >&4
-			syl_print_info -n " > Would you like to use the SSH key \"${ssh_keys}\"? [Y/n] " >&4
+			syl_print_info -n " > Would you like to use the SSH key named \"${ssh_keys}\"? [Y/n] " >&4
 			reply=$(syl_prompt <&3)
 			if [ $? -eq 0 ] && ! syl_is_no "${reply}"
 			then
 				printf '%s\n' "${ssh_keys}"
+				exit 0
 			fi
 		else
 			syl_print_info 'None found.' >&4
 		fi
+		exit 1
+	)
+}
+
+syl_generate_ssh_key_name() {
+	(
+		prefix="${SYL_SSH_DIR}/${1:-"${SYL_SSH_KEY_NAME_PREFIX}"}"
+		suffix=0
+		path="${prefix}"
+		while [ -e "${path}" ] || [ -e "${path}.pub" ]
+		do
+			suffix=$(($suffix + 1))
+			path="${prefix}-${suffix}"
+		done
+		printf '%s\n' "${path##*/}"
+	)
+}
+
+syl_create_ssh_key_interactive() {
+	(
+		# Directly access process TTY
+		exec 3</dev/tty 4>/dev/tty
+		if [ $? -ne 0 ]
+		then
+			printf '%s: Unable to access process TTY.\n' \
+				'syl_select_existing_ssh_key_interactive' >&2
+			exit 2
+		fi
+
+		syl_print_info \
+			' > In order to create a new SSH key pair you need to provide an email address' \
+			'   (which will be used to annotate your public key) and a passphrase (which will ' \
+			'   be used to encrypt your private key, keeping it safe from curious eyes).' >&4
+
+		# Get user email
+		email=''
+		while [ -z "${email}" ]
+		do
+			syl_print_info -n ' > Enter the email address: ' >&4
+			reply=$(syl_prompt_email)
+			if [ $? -eq 0 ]
+			then
+				if [ -z "${reply}" ]
+				then
+					syl_print_warn ' > Invalid email address...' >&4
+					syl_print_info " > Let's try again." >&4
+					continue
+				fi
+				email="${reply}"
+				syl_print_info -n " > Confirm usage of email \"${email}\"? [Y/n] " >&4
+				reply=$(syl_prompt <&3)
+				if [ $? -eq 0 ]
+				then
+					if syl_is_no "${reply}"
+					then
+						email=''
+						continue
+					else
+						syl_print_info ' > OK' >&4
+						break
+					fi
+				else
+					printf 'Email confirmation aborted...\n' >&2
+					syl_print_warn ' > Aborting...' >&4
+					exit 1
+				fi
+			else
+				printf 'Email input aborted...\n' >&2
+				syl_print_warn ' > Aborting...' >&4
+				exit 1
+			fi
+		done
+
+		# Get passphrase
+		passphrase=''
+		while [ -z "${passphrase}" ]
+		do
+			syl_print_info -n ' > Enter the passphrase: ' >&4
+			reply=$(syl_prompt_password <&3)
+			status="$?"
+			echo >&4
+			if [ "${status}" -eq 0 ]
+			then
+				if [ -z "${reply}" ]
+				then
+					syl_print_warn \
+						' > If no passphrase is provided, your private key will be readable by anyone' \
+						'   who gains access to your computer!' >&4
+					syl_print_info -n ' > Proceed anyway? [y/N] ' >&4
+					reply=$(syl_prompt <&3)
+					if [ $? -eq 0 ] && syl_is_yes "${reply}"
+					then
+						break
+					fi
+					continue
+				else
+					syl_print_info ' > OK' >&4
+					syl_print_info -n ' > Enter the same passphrase again to confirm: ' >&4
+					passphrase="${reply}"
+					reply=$(syl_prompt_password <&3)
+					status="$?"
+					echo >&4
+					if [ "${status}" -eq 0 ] && [ "X${passphrase}" = "X${reply}" ]
+					then
+						break
+					fi
+					passphrase=''
+					syl_print_warn ' > The passphrases do not match...' >&4
+					syl_print_info " > Let's try again." >&4
+				fi
+			else
+				printf 'Password input aborted...\n' >&2
+				syl_print_warn ' > Aborting...' >&4
+				exit 1
+			fi
+		done
+
+		# Generate an available key name
+		key_name=$(syl_generate_ssh_key_name)
+
+		# Generate SSH Key
+		ssh-keygen \
+			-t ed25519 \
+			-f "${SYL_SSH_DIR}/${key_name}" \
+			-C "${email}" \
+			-N "${passphrase}" >&2
+
+		if [ $? -ne 0 ]
+		then
+			printf 'Error generating SSH key pair...\n' >&2
+			syl_print_warn ' > Error generating SSH key pair ...' >&4
+			exit 2
+		fi
+
+		printf '%s\n' "${key_name}" "${passphrase}"
 		exit 0
 	)
 }
 
-syl_prepare_ssh_key() {
+syl_ssh_auth() {
 	(
-		if ! syl_is_valid_ssh_key "${SYL_SSH_KEY_NAME}"
+		selected_ssh_key=$(syl_select_existing_ssh_key_interactive)
+		if [ $? -eq 0 ] && [ -n "${selected_ssh_key}" ]
 		then
-			syl_print_info -n ' > Searching SSH keys on your system... '
-			sleep 1
+			syl_add_ssh_key_to_agent "${selected_ssh_key}"
+		else
+			syl_print_info "OK! Let's create one!"
+			created_ssh_key=$(syl_create_ssh_key_interactive)
 
-
-
-			(
-				# Multiple SSH Keys found
-				[ "${ssh_key_count}" -gt 1 ] || exit 1
-				syl_print_info "${ssh_key_count} keys found!"
-
-				selected=$(syl_select_interactive "${ssh_keys}" ' > Which one would you like to use?')
-				[ $? -eq 0 ] && [ -n "${selected}" ] && (
-					syl_select_ssh_key "${selected}" || (
-						printf 'Error selecting one of multiple SSH keys: %s\n' "${selected}" >&2
-						exit 2
-					)
-				)
-			) || (
-				# A single SSH key was found
-				[ $? -gt 1 ] && exit 2
-				[ "${ssh_key_count}" -eq 1 ] || exit 1
-				syl_print_info "${ssh_key_count} key found!"
-				syl_print_info -n " > Would you like to use the SSH key \"${ssh_keys}\"? [Y/n] "
-				reply=$(syl_prompt)
-				[ $? -eq 0 ] && ! syl_is_no "${reply}" && (
-					syl_select_ssh_key "${ssh_keys}" || (
-						printf 'Error selecting unique SSH key found: %s\n' "${selected}" >&2
-						exit 2
-					)
-				)
-			) || (
-				# No SSH was found or none was selected
-				[ $? -gt 1 ] && exit 2
-				[ "${ssh_key_count}" -eq 0 ] && syl_print_info 'None found.'
-				syl_print_info
-					" > OK. Let's create one!" \
-					" > In order to create a SSH key you need to provide an email address and a passphrase." \
-					" > Let's begin with the email address!"
-
-				# Get user email
-				email=''
-				while [ -z "${email}" ]
-				do
-					syl_print_info -n " > Which email address would you like to use? "
-					reply=$(syl_prompt_email)
-					if [ $? -eq 0 ] && [ -n "${reply}" ]
-					then
-						email="${reply}"
-						syl_print_info -n " > Confirm usage of email \"${email}\"? [Y/n] "
-						reply=$(syl_prompt)
-						if [ $? -eq 0 ]
-						then
-							if syl_is_no "${reply}"
-							then
-								email=''
-								continue
-							else
-								syl_print_info ' > OK.'
-								break
-							fi
-						else
-							printf 'Aborted by user due to invalid input for email confirmation...\n'
-							syl_print_info ' > Aborting...'
-							exit 1
-						fi
-					else
-						printf 'Aborted by user due to invalid input for email...\n'
-						syl_print_info ' > Aborting...'
-						exit 1
-					fi
-				done
-
-				# Get passphrase
-				# passphrase=''
-				# while [ -z "${passphrase}" ]
-				# do
-				# done
-
-				# Generate SSH Key
-				ssh-keygen \
-					-t ed25519 \
-					-C "${email}" \
-					-f "${SYL_SSH_DIR}/${SYL_SSH_KEY_NAME}" \
-					-N "${passphrase}" >&2 || exit 2
-
-			) || exit $?
 		fi
+
 	)
 }
 
@@ -492,7 +551,7 @@ syl_install_sylsh() {
 			reply=$(syl_prompt)
 			syl_is_no "${reply}" && exit 1
 			echo
-			( syl_prepare_ssh_key && ( syl_clone_sylsh || exit 2 ) ) || exit $?
+			( syl_ssh_auth && ( syl_clone_sylsh || exit 2 ) ) || exit $?
 		fi
 	)
 }
@@ -574,8 +633,8 @@ syl_main() {
 			fi
 
 			# Save shellenv in 
-			echo 'eval "$(/opt/homebrew/bin/brew shellenv)"' \
-				| tee -a "${HOME}/.zprofile" "${HOME}/.bash_profile" >/dev/null
+			echo 'eval "$(/opt/homebrew/bin/brew shellenv)"' |
+				tee -a "${HOME}/.zprofile" "${HOME}/.bash_profile" >/dev/null
 
 			eval "$(/opt/homebrew/bin/brew shellenv)"
 		fi
