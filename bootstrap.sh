@@ -221,6 +221,12 @@ syl_is_sylsh_cloned() {
 	)
 }
 
+syl_run_sylsh_install() {
+	(
+		cd -- "${SYL_SYLSH_DIR}" >&2 && bin/syl configure
+	)
+}
+
 syl_clone_sylsh() {
 	(
 		syl_is_sylsh_cloned || (
@@ -642,7 +648,7 @@ syl_add_ssh_key_to_agent_interactive() {
 		(
 			# Offer help to register SSH key on GitHub (isolated in a subshell)
 			syl_print_info -n ' > Would you like to register it right now? [y/N] ' >&4
-			reply=$(syl_prompt)
+			reply=$(syl_prompt <&3)
 			if [ $? -eq 0 ] && syl_is_yes "${reply}"
 			then
 				syl_print_info ' > OK' >&4
@@ -669,8 +675,9 @@ syl_add_ssh_key_to_agent_interactive() {
 						' > Please copy your public key, access the URL above and paste it' \
 						'   in the "key" field of the form.' >&4
 				)
-				syl_print_info -n ' > Press return when you are ready to preceed.' >&4
-				syl_prompt >/dev/null
+				syl_print_info -n ' > Press return when you are ready to proceed.' >&4
+				syl_prompt >/dev/null <&3
+				syl_print_info ' > OK' >&4
 			fi
 		)
 
@@ -723,6 +730,7 @@ syl_install_sylsh() {
 			'ssh-add' \
 			'ssh-keygen' \
 			'ssh-keyscan' \
+			'expect' \
 			'git' || exit 2
 
 		if ! syl_clone_sylsh;
@@ -736,8 +744,57 @@ syl_install_sylsh() {
 			reply=$(syl_prompt)
 			syl_is_no "${reply}" && exit 1
 			echo
-			( syl_ssh_auth && ( syl_clone_sylsh || exit 2 ) ) || exit $?
+
+			syl_ssh_auth
+			status="$?"
+			if [ "${status}" -ne 0 ]
+			then
+				if [ "${status}" -gt 1 ]
+				then
+					printf 'Error authenticating user SSH key...\n' >&2
+					syl_print_warn ' > Error authenticating user SSH key...'
+					exit 2
+				fi
+				printf 'Authentication aborted by the user...\n' >&2
+				syl_print_warn ' > Authentication aborted...'
+				exit 1
+			fi
+
+			syl_print_info \
+				'' \
+				' > Cloning SYLSH...'
+			if ! syl_clone_sylsh
+			then
+				printf 'Error cloning SYLSH repository...\n' >&2
+				syl_print_warn ' > Error cloning SYLSH repository...'
+				exit 2
+			fi
+			syl_print_info ' > OK'
 		fi
+
+		syl_print_info \
+			'' \
+			'' \
+			' > Preparing to configure SYLSH...' \
+			'' \
+			'' \
+			'' \
+			''
+
+		sleep 1
+
+		syl_run_sylsh_install
+		status="$?"
+		if [ "${status}" -ne 0 ]
+		then
+			printf 'Error running configure action from sylsh utility: %s\n' \
+				"${status}" >&2
+		fi
+
+		syl_print_info \
+			'' \
+			' > Installation finished!'
+		exit 0
 	)
 }
 
@@ -822,6 +879,7 @@ syl_main() {
 				tee -a "${HOME}/.zprofile" "${HOME}/.bash_profile" >/dev/null
 
 			eval "$(/opt/homebrew/bin/brew shellenv)"
+			ask_restart_terminal='1'
 		fi
 
 		# Double-check if Homebrew has been correctly installed
@@ -876,6 +934,7 @@ syl_main() {
 			)
 			then
 				syl_print_info "[${CHECK}] Docker Desktop successfully installed!"
+				syl_is_valid_command 'open' && open -j "${SYL_DOCKER_DESKTOP_APP}"
 			else
 				syl_print_warn \
 					"[${CROSS}] Something went wrong while installing Docker Desktop..." \
@@ -932,6 +991,7 @@ syl_main() {
 			if [ "${result}" -eq 0 ]
 			then
 				syl_print_info "[${CHECK}] syl.sh successfully installed!"
+				ask_restart_terminal='1'
 			elif [ "${result}" -eq 1 ]
 			then
 				syl_print_warn "[${CROSS}] syl.sh installation aborted by the user."
@@ -942,6 +1002,14 @@ syl_main() {
 					"    with error details: \"${SYL_LOG}\"". \
 					''
 			fi
+		fi
+
+		if [ -n "${ask_restart_terminal}" ]
+		then
+			syl_print_warn \
+				' > The installation process has made changes to your environment and' \
+				'   your terminal needs to be restarted. Please close your current terminal' \
+				'   and reopen it for changes to take effect.'
 		fi
 	)
 }
