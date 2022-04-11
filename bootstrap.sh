@@ -95,7 +95,7 @@ syl_prompt_email() {
 		reply=$(syl_prompt)
 		if [ $? -eq 0 ]
 		then
-			printf '%s' "${reply}" |
+			printf '%s\n' "${reply}" |
 			sed -En '1s/^[[:space:]]*([[:graph:]]+@[[:graph:]]+)[[:space:]]*$/\1/p'
 			exit 0
 		fi
@@ -403,7 +403,7 @@ syl_create_ssh_key_interactive() {
 		if [ $? -ne 0 ]
 		then
 			printf '%s: Unable to access process TTY.\n' \
-				'syl_select_existing_ssh_key_interactive' >&2
+				'syl_create_ssh_key_interactive' >&2
 			exit 2
 		fi
 
@@ -482,6 +482,7 @@ syl_create_ssh_key_interactive() {
 					echo >&4
 					if [ "${status}" -eq 0 ] && [ "X${passphrase}" = "X${reply}" ]
 					then
+						syl_print_info ' > OK' >&4
 						break
 					fi
 					passphrase=''
@@ -500,6 +501,7 @@ syl_create_ssh_key_interactive() {
 
 		# Generate SSH Key
 		ssh-keygen \
+			-ALKSmdlkma asjndakjnasd \
 			-t ed25519 \
 			-f "${SYL_SSH_DIR}/${key_name}" \
 			-C "${email}" \
@@ -517,18 +519,50 @@ syl_create_ssh_key_interactive() {
 	)
 }
 
+syl_add_ssh_key_to_agent_interactive() {
+	(
+		syl_print_info " > EXECUTING syl_add_ssh_key_to_agent_interactive: $# arguments received..."
+		exit 2
+	)
+}
+
 syl_ssh_auth() {
 	(
 		selected_ssh_key=$(syl_select_existing_ssh_key_interactive)
-		if [ $? -eq 0 ] && [ -n "${selected_ssh_key}" ]
+		status="$?"
+		if [ "${status}" -eq 0 ] && [ -n "${selected_ssh_key}" ]
 		then
-			syl_add_ssh_key_to_agent "${selected_ssh_key}"
+			syl_add_ssh_key_to_agent_interactive "${selected_ssh_key}"
 		else
-			syl_print_info "OK! Let's create one!"
+			if [ "${status}" -gt 1 ]
+			then
+				printf 'Unexpected error while trying to select existing SSH keys...\n' >&2
+			fi
+			syl_print_info " > OK. Let's create a new SSH key pair!"
 			created_ssh_key=$(syl_create_ssh_key_interactive)
-
+			status="$?"
+			if [ "${status}" -eq 0 ] && [ -n "${created_ssh_key}" ]
+			then
+				printf '%s\n' "${created_ssh_key}" | (
+					if read -r key && read -r passphrase && [ -n "${key}" ]
+					then
+						syl_add_ssh_key_to_agent_interactive "${key}" "${passphrase}"
+					else
+						printf 'Error reading attributes from new SSH key...\n' >&2
+						syl_print_warn ' > Unexpected error while reading attribures from new SSH key...'
+						exit 2
+					fi
+				)
+			else
+				if [ "${status}" -gt 1 ]
+				then
+					printf 'Unexpected error while trying to create a new SSH keys...\n' >&2
+					exit 2
+				fi
+				printf 'Aborted creation of a new SSH keys...\n' >&2
+				exit 1
+			fi
 		fi
-
 	)
 }
 
