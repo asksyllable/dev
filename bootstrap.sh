@@ -13,6 +13,7 @@ SYL_SSH_KNOWN_HOSTS="${SYL_SSH_DIR}/known_hosts"
 SYL_SSH_KEY_NAME_PREFIX="sylsh"
 
 SYL_GITHUB='github.com'
+SYL_GITHUB_KEY_REGISTRATION_URL='https://github.com/settings/ssh/new'
 SYL_SYLSH_GIT_PATH='asksyllable/sylsh.git'
 
 DEFAULT_HOMEBREW_URL='https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh'
@@ -308,6 +309,9 @@ syl_is_valid_ssh_key() {
 				test -f "${public_key}" &&
 				test -r "${public_key}" &&
 				ssh-keygen -l -f "${public_key}" >&2
+			) && (
+				printf '%s\n' "${private_key}"
+				exit 0
 			)
 		)
 	)
@@ -319,7 +323,7 @@ syl_get_available_ssh_keys() {
 		do
 			name="${entry##*'/'}"
 			name="${name%'.pub'}"
-			if syl_is_valid_ssh_key "${name}"
+			if syl_is_valid_ssh_key "${name}" >&2
 			then
 				printf 'Valid SSH key found: %s\n' "${name}" >&2
 				printf '%s\n' "${name}"
@@ -362,6 +366,7 @@ syl_select_existing_ssh_key_interactive() {
 				syl_select_interactive ' > Your option?')
 			if [ $? -eq 0 ] && [ -n "${selected}" ]
 			then
+				syl_print_info " > SSH key \"${selected}\" selected!" >&4
 				printf '%s\n' "${selected}"
 				exit 0
 			fi
@@ -372,6 +377,7 @@ syl_select_existing_ssh_key_interactive() {
 			reply=$(syl_prompt <&3)
 			if [ $? -eq 0 ] && ! syl_is_no "${reply}"
 			then
+				syl_print_info " > SSH key \"${ssh_keys}\" selected!" >&4
 				printf '%s\n' "${ssh_keys}"
 				exit 0
 			fi
@@ -408,6 +414,7 @@ syl_create_ssh_key_interactive() {
 		fi
 
 		syl_print_info \
+			" > OK. Let's create a new SSH key pair!" \
 			' > In order to create a new SSH key pair you need to provide an email address' \
 			'   (which will be used to annotate your public key) and a passphrase (which will ' \
 			'   be used to encrypt your private key, keeping it safe from curious eyes).' >&4
@@ -490,7 +497,7 @@ syl_create_ssh_key_interactive() {
 					syl_print_info " > Let's try again." >&4
 				fi
 			else
-				printf 'Password input aborted...\n' >&2
+				printf 'Passphrase input aborted...\n' >&2
 				syl_print_warn ' > Aborting...' >&4
 				exit 1
 			fi
@@ -520,10 +527,154 @@ syl_create_ssh_key_interactive() {
 	)
 }
 
+syl_add_ssh_key_to_agent() {
+	(
+		key="$1"
+		pass="$2"
+		if syl_is_valid_command 'expect'
+		then
+			expect >&2 << EOF
+spawn ssh-add "${key}"
+expect "Enter passphrase"
+send "${pass}\n"
+expect eof
+EOF
+			if [ $? -eq 0 ]
+			then
+				printf 'SSH key successfully added to SSH agent: %s\n' \
+					"${key}" >&2
+				exit 0
+			fi
+		fi
+		exit 2
+	)
+}
+
 syl_add_ssh_key_to_agent_interactive() {
 	(
-		syl_print_info " > EXECUTING syl_add_ssh_key_to_agent_interactive: $# arguments received..."
-		exit 2
+		# Directly access process TTY
+		exec 3</dev/tty 4>/dev/tty
+		if [ $? -ne 0 ]
+		then
+			printf '%s: Unable to access process TTY.\n' \
+				'syl_add_ssh_key_to_agent_interactive' >&2
+			exit 2
+		fi
+
+		if [ $# -gt 1 ]
+		then
+			key="$1"
+			pass="$2"
+		elif [ $# -gt 0 ]
+		then
+			key="$1"
+			pass=''
+		else
+			printf 'Aborting due to no SSH key name provided by the user...\n' >&2
+			syl_print_warn " > No SSH key name provided..." >&4
+			exit 1
+		fi
+
+		key_path=$(syl_is_valid_ssh_key "${key}")
+		if [ $? -ne 0 ] || [ -z "${key_path}" ]
+		then
+			printf 'Aborting due to no valid SSH key name provided by the user...\n' >&2
+			syl_print_warn " > No valid SSH key name provided..." >&4
+			exit 1
+		fi
+
+		public_key=''
+		attempts=0
+		while true
+		do
+			public_key=$(ssh-keygen -y -f "${key_path}" -P "${pass}")
+			if [ $? -eq 0 ] || [ -n "${public_key}" ]
+			then
+				[ "${attempts}" -gt 0 ] && syl_print_info " > OK" >&4
+				break
+			elif [ "${attempts}" -lt 3 ]
+			then
+				[ "${attempts}" -gt 0 ] && syl_print_warn " > Invalid passphrase..." >&4
+				attempts=$(($attempts + 1))
+				syl_print_info -n " > Please enter the passphrase for key \"${key}\": " >&4
+				reply=$(syl_prompt_password <&3)
+				status="$?"
+				echo >&4
+				if [ "${status}" -eq 0 ]
+				then
+					pass="${reply}"
+					continue
+				else
+					printf 'Passphrase input aborted when adding key to SSH agent...\n' >&2
+					syl_print_warn ' > Aborting...' >&4
+					exit 1
+				fi
+			else
+				printf 'No valid password provided in multiple attempts...\n' >&2
+				syl_print_warn " > No valid password provided in multiple attempts..." >&4
+				exit 2
+			fi
+		done
+
+		if ! syl_add_ssh_key_to_agent "${key_path}" "${pass}"
+		then
+			printf 'Error adding key to SSH agent...\n' >&2
+			syl_print_warn ' > Error adding key to SSH agent...' >&4
+			exit 2
+		fi
+
+		syl_print_info \
+			" > The SSH key \"${key}\" has been successfully added to your SSH agent." \
+			" > Before proceeding, please make sure you have successfully registered the" \
+			"   following public key to your GitHub account and that you have access to" \
+			"   Syllable's private repositories." \
+			'' \
+			" > GitHub Key Registration URL:" >&4
+		syl_print_warn \
+			"   ${SYL_GITHUB_KEY_REGISTRATION_URL}" \
+			'' >&4
+		syl_print_info \
+			" > Public Key:" >&4
+		syl_print_warn \
+			"   ${public_key}" \
+			'' >&4
+
+		(
+			# Offer help to register SSH key on GitHub (isolated in a subshell)
+			syl_print_info -n ' > Would you like to register it right now? [y/N] ' >&4
+			reply=$(syl_prompt)
+			if [ $? -eq 0 ] && syl_is_yes "${reply}"
+			then
+				syl_print_info ' > OK' >&4
+				syl_is_valid_command 'pbcopy' && (
+					printf '%s\n' "${public_key}" | pbcopy && (
+						syl_print_info \
+							' > Your public key has been copied to your clipboard!' >&4
+						syl_is_valid_command 'open' && (
+							syl_print_info \
+								' > If your browser does not show up shortly, please access the URL above' \
+								'   and paste your public key in the "key" field of the form.' >&4
+							sleep 4
+							open -u "${SYL_GITHUB_KEY_REGISTRATION_URL}"
+							exit 0
+						) || (
+							syl_print_info \
+								' > Please access the URL above and paste your public key in the "key" field' \
+								'   of the form.' >&4
+							exit 0
+						)
+					)
+				) || (
+					syl_print_info \
+						' > Please copy your public key, access the URL above and paste it' \
+						'   in the "key" field of the form.' >&4
+				)
+				syl_print_info -n ' > Press return when you are ready to preceed.' >&4
+				syl_prompt >/dev/null
+			fi
+		)
+
+		exit 0
 	)
 }
 
@@ -539,7 +690,6 @@ syl_ssh_auth() {
 			then
 				printf 'Unexpected error while trying to select existing SSH keys...\n' >&2
 			fi
-			syl_print_info " > OK. Let's create a new SSH key pair!"
 			created_ssh_key=$(syl_create_ssh_key_interactive)
 			status="$?"
 			if [ "${status}" -eq 0 ] && [ -n "${created_ssh_key}" ]
