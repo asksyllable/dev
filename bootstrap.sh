@@ -537,15 +537,24 @@ syl_add_ssh_key_to_agent() {
 	(
 		key="$1"
 		pass="$2"
-		if syl_is_valid_command 'expect'
-		then
-			expect >&2 << EOF
+		if [ -n "${pass}" ]; then
+			if syl_is_valid_command 'expect'
+			then
+				expect >&2 << EOF
 spawn ssh-add "${key}"
 expect "Enter passphrase"
 send "${pass}\n"
 expect eof
 EOF
-			if [ $? -eq 0 ]
+				if [ $? -eq 0 ]
+				then
+					printf 'SSH key successfully added to SSH agent: %s\n' \
+						"${key}" >&2
+					exit 0
+				fi
+			fi
+		else
+			if ssh-add "${key}"
 			then
 				printf 'SSH key successfully added to SSH agent: %s\n' \
 					"${key}" >&2
