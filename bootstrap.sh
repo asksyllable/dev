@@ -255,10 +255,11 @@ syl_select_interactive() {
 		prompt="${1:-" Your option?"}"
 		format="${COLOR_CYAN} %d) %s\n${COLOR_RESET}"
 		index='0'
+		options=''
 		while read -r item
 		do
 			index=$(($index + 1))
-			eval "option_${index}=${item}"
+			options=$(test -n "${options}" && printf '%s\n' "${options}" "${item}" || printf '%s\n' "${item}")
 			printf "${format}" "${index}" "${item}" >&4
 		done
 		[ "${index}" -lt 1 ] && exit 1
@@ -271,7 +272,7 @@ syl_select_interactive() {
 			[ "${reply}" -le "${index}" ]
 		)
 		then
-			eval "printf '%s\n' \"\${option_${reply}}\""
+			printf '%s' "${options}" | sed -n -e "${reply}p"
 			exit 0
 		fi
 		exit 1
@@ -951,6 +952,69 @@ syl_main() {
 					'    Please contact IT support and provide the following file' \
 					"    with error details: \"${SYL_LOG}\"". \
 					'    You can try a manual install at "https://docs.docker.com/desktop/mac/install/".' \
+					''
+			fi
+		fi
+
+		# Check if AWS CLI tool is installed
+		if syl_is_valid_command -v 'aws'
+		then
+			syl_print_info "[${CHECK}] AWS CLI is already installed!"
+		else
+			syl_print_info \
+				'Installing AWS CLI...' \
+				''
+			if (
+				exec 2>&1
+				brew install awscli
+			)
+			then
+				syl_print_info "[${CHECK}] AWS CLI successfully installed!"
+				echo
+				syl_print_info -n '> Would you like to configure AWS CLI now? [Y/n] '
+				reply=$(syl_prompt)
+				echo
+				if ! syl_is_no "${reply}"
+				then
+					syl_print_info \
+						"> OK! Let's begin:" \
+						'' \
+						'> As part of your onboarding process, you probably received your AWS CLI' \
+						'  credentials (Access Key ID and Secret Access Key) which are necessary to' \
+						'  properly use the AWS CLI tool and run cloud-dependent applications.' \
+						"> If haven't received them, please contact your manager right away as you'll" \
+						"  need them in the following steps." \
+						''
+					if (
+						exec 2>&1
+						aws configure
+					)
+					then
+						syl_print_info "[${CHECK}] AWS CLY successfully configured!"
+					else
+						syl_print_warn \
+							"[${CROSS}] Something went wrong while configuring AWS CLI..." \
+							'    Please contact IT support and provide the following file' \
+							"    with error details: \"${SYL_LOG}\"". \
+							"    You can also try to configure it again manually by typing" \
+							'    the command `aws configure` in your terminal at any time.'
+							''
+					fi
+				else
+					syl_print_info \
+						'> OK!' \
+						'> You can configure it by typing `aws configure` in your terminal at any time.' \
+						"> Please remember to configure it later or you won't be able to properly run" \
+						"  cloud-dependent applications." \
+						''
+				fi
+			else
+				syl_print_warn \
+					"[${CROSS}] Something went wrong while installing AWS CLI..." \
+					'    Please contact IT support and provide the following file' \
+					"    with error details: \"${SYL_LOG}\"". \
+					'    You can also try a manual install at:' \
+					'    https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html' \
 					''
 			fi
 		fi
